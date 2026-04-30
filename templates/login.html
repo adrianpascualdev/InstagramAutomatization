@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-md-5">
+    <div class="card p-4 shadow-lg border-0 rounded-4">
+      <h1 class="h3 mb-3">Entrar al panel</h1>
+      {% if error %}<div class="alert alert-danger">{{ error }}</div>{% endif %}
+      <form method="post">
+        <label class="form-label">Contraseña admin</label>
+        <input class="form-control form-control-lg" type="password" name="password" required>
+        <button class="btn btn-primary w-100 mt-3 btn-lg">Entrar</button>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}

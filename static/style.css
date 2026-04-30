@@ -1,0 +1,12 @@
+body { min-height: 100vh; background: radial-gradient(circle at top left, #fff1f2, #eef2ff 45%, #f8fafc); }
+.glass { background: rgba(15, 23, 42, .88); backdrop-filter: blur(12px); }
+.navbar-brand { color: white !important; }
+.card { background: rgba(255, 255, 255, .88); backdrop-filter: blur(8px); }
+.top-1 { top: 1rem; }
+.badge { border-radius: 999px; padding: .45rem .7rem; }
+.status-pending { background: #fef3c7; color: #92400e; }
+.status-processing { background: #dbeafe; color: #1e40af; }
+.status-published { background: #dcfce7; color: #166534; }
+.status-error { background: #fee2e2; color: #991b1b; }
+.post-card { transition: transform .15s ease, box-shadow .15s ease; }
+.post-card:hover { transform: translateY(-2px); }

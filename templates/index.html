@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row g-4">
+  <div class="col-lg-5">
+    <div class="card p-4 border-0 rounded-4 shadow-sm sticky-lg-top top-1">
+      <h1 class="h3">Programar Reel</h1>
+      <p class="text-muted">Sube un MP4, escribe el texto y elige la hora.</p>
+      <form action="/posts" method="post" enctype="multipart/form-data">
+        <label class="form-label">Vídeo</label>
+        <input class="form-control" type="file" name="video" accept="video/mp4,video/quicktime" required>
+        <label class="form-label mt-3">Caption</label>
+        <textarea class="form-control" name="caption" rows="5" maxlength="2200" required></textarea>
+        <label class="form-label mt-3">Fecha y hora</label>
+        <input class="form-control" type="datetime-local" name="scheduled_at" required>
+        <button class="btn btn-primary btn-lg w-100 mt-4">Guardar programación</button>
+      </form>
+      <hr>
+      <p class="small text-muted mb-1">URL para cron-job.org:</p>
+      <code class="small d-block text-break">{{ request.url_root.rstrip('/') }}/api/cron?secret={{ cron_secret }}</code>
+    </div>
+  </div>
+  <div class="col-lg-7">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h2 class="h4 m-0">Publicaciones</h2>
+      <span class="badge text-bg-light">{{ posts|length }} total</span>
+    </div>
+    {% for p in posts %}
+      <div class="card post-card border-0 rounded-4 shadow-sm mb-3">
+        <div class="card-body">
+          <div class="d-flex justify-content-between gap-3">
+            <div>
+              <span class="badge status-{{ p.status }}">{{ p.status }}</span>
+              <p class="mt-3 mb-2 fw-semibold">{{ p.caption }}</p>
+              <p class="small text-muted mb-1">Programado UTC: {{ p.scheduled_at }}</p>
+              {% if p.ig_media_id %}<p class="small mb-1">Instagram media ID: {{ p.ig_media_id }}</p>{% endif %}
+              {% if p.error %}<div class="alert alert-danger small mt-2">{{ p.error }}</div>{% endif %}
+              <a class="small" href="{{ p.video_url }}" target="_blank">Ver vídeo en Cloudinary</a>
+            </div>
+            <form action="/delete/{{ p.id }}" method="post" onsubmit="return confirm('¿Borrar esta programación?')">
+              <button class="btn btn-sm btn-outline-danger">Borrar</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    {% else %}
+      <div class="card p-5 text-center border-0 rounded-4 shadow-sm text-muted">Todavía no hay posts programados.</div>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}
