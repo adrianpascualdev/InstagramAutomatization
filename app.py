@@ -237,12 +237,9 @@ def create_post():
     # datetime-local llega sin zona; asumimos hora local del navegador/usuario.
     local_dt = datetime.fromisoformat(scheduled_local)
     scheduled_utc = local_dt.astimezone().astimezone(timezone.utc).isoformat()
-
-    upload = cloudinary.uploader.upload_large(
+    upload = cloudinary.uploader.upload(
         video,
-        resource_type="video",
-        folder="instagram_scheduler",
-        chunk_size=6_000_000,
+        resource_type="video"
     )
     video_url = upload["secure_url"]
     now = datetime.now(timezone.utc).isoformat()
