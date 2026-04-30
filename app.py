@@ -2,7 +2,6 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 from functools import wraps
-from urllib.parse import urlparse
 
 import cloudinary
 import cloudinary.uploader
@@ -18,9 +17,12 @@ APP_SECRET = os.getenv("APP_SECRET", os.urandom(24).hex())
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 CRON_SECRET = os.getenv("CRON_SECRET", "change-me")
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///data.db")
+
 IG_USER_ID = os.getenv("IG_USER_ID", "")
 IG_ACCESS_TOKEN = os.getenv("IG_ACCESS_TOKEN", "")
 GRAPH_VERSION = os.getenv("GRAPH_VERSION", "v22.0")
+
+TIKTOK_ACCESS_TOKEN = os.getenv("TIKTOK_ACCESS_TOKEN", "")
 
 cloudinary.config(
     cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
@@ -47,9 +49,9 @@ def db_conn():
 def init_db():
     conn = db_conn()
     cur = conn.cursor()
+
     if is_postgres():
-        cur.execute(
-            """
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS posts (
                 id SERIAL PRIMARY KEY,
                 caption TEXT NOT NULL,
@@ -58,14 +60,15 @@ def init_db():
                 status TEXT NOT NULL DEFAULT 'pending',
                 creation_id TEXT,
                 ig_media_id TEXT,
+                tiktok_publish_id TEXT,
+                post_instagram INTEGER DEFAULT 1,
+                post_tiktok INTEGER DEFAULT 0,
                 error TEXT,
                 created_at TEXT NOT NULL
             )
-            """
-        )
+        """)
     else:
-        cur.execute(
-            """
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS posts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 caption TEXT NOT NULL,
@@ -74,11 +77,25 @@ def init_db():
                 status TEXT NOT NULL DEFAULT 'pending',
                 creation_id TEXT,
                 ig_media_id TEXT,
+                tiktok_publish_id TEXT,
+                post_instagram INTEGER DEFAULT 1,
+                post_tiktok INTEGER DEFAULT 0,
                 error TEXT,
                 created_at TEXT NOT NULL
             )
-            """
-        )
+        """)
+
+    # Migraciones por si ya existía la tabla antigua
+    for col in [
+        ("post_instagram", "INTEGER DEFAULT 1"),
+        ("post_tiktok", "INTEGER DEFAULT 0"),
+        ("tiktok_publish_id", "TEXT"),
+    ]:
+        try:
+            cur.execute(f"ALTER TABLE posts ADD COLUMN {col[0]} {col[1]}")
+        except Exception:
+            pass
+
     conn.commit()
     conn.close()
 
@@ -120,6 +137,9 @@ def graph_url(path):
 
 
 def create_ig_container(post):
+    if not IG_USER_ID or not IG_ACCESS_TOKEN:
+        raise RuntimeError("Faltan IG_USER_ID o IG_ACCESS_TOKEN")
+
     r = requests.post(
         graph_url(f"{IG_USER_ID}/media"),
         data={
@@ -139,7 +159,10 @@ def create_ig_container(post):
 def container_status(creation_id):
     r = requests.get(
         graph_url(creation_id),
-        params={"fields": "status_code,status", "access_token": IG_ACCESS_TOKEN},
+        params={
+            "fields": "status_code,status",
+            "access_token": IG_ACCESS_TOKEN,
+        },
         timeout=30,
     )
     data = r.json()
@@ -151,7 +174,10 @@ def container_status(creation_id):
 def publish_container(creation_id):
     r = requests.post(
         graph_url(f"{IG_USER_ID}/media_publish"),
-        data={"creation_id": creation_id, "access_token": IG_ACCESS_TOKEN},
+        data={
+            "creation_id": creation_id,
+            "access_token": IG_ACCESS_TOKEN,
+        },
         timeout=60,
     )
     data = r.json()
@@ -160,52 +186,140 @@ def publish_container(creation_id):
     return data.get("id")
 
 
+def publish_tiktok(post):
+    if not TIKTOK_ACCESS_TOKEN:
+        raise RuntimeError("Falta TIKTOK_ACCESS_TOKEN")
+
+    r = requests.post(
+        "https://open.tiktokapis.com/v2/post/publish/video/init/",
+        headers={
+            "Authorization": f"Bearer {TIKTOK_ACCESS_TOKEN}",
+            "Content-Type": "application/json; charset=UTF-8",
+        },
+        json={
+            "post_info": {
+                "title": post["caption"][:2200],
+                "privacy_level": "SELF_ONLY",
+                "disable_duet": False,
+                "disable_comment": False,
+                "disable_stitch": False,
+            },
+            "source_info": {
+                "source": "PULL_FROM_URL",
+                "video_url": post["video_url"],
+            },
+        },
+        timeout=60,
+    )
+
+    data = r.json()
+    if not r.ok:
+        raise RuntimeError(data)
+
+    return data.get("data", {}).get("publish_id")
+
+
 def process_due_posts(limit=5):
     now = datetime.now(timezone.utc).isoformat()
+
     rows = query_all(
-        "SELECT * FROM posts WHERE scheduled_at <= %s AND status IN ('pending','processing') ORDER BY scheduled_at ASC LIMIT %s" if is_postgres()
+        "SELECT * FROM posts WHERE scheduled_at <= %s AND status IN ('pending','processing') ORDER BY scheduled_at ASC LIMIT %s"
+        if is_postgres()
         else "SELECT * FROM posts WHERE scheduled_at <= ? AND status IN ('pending','processing') ORDER BY scheduled_at ASC LIMIT ?",
         (now, limit),
     )
+
     results = []
+
     for post in rows:
         try:
+            post_instagram = int(post.get("post_instagram", 1) or 0)
+            post_tiktok = int(post.get("post_tiktok", 0) or 0)
+
+            # Si está pendiente, lanza publicaciones
             if post["status"] == "pending":
-                creation_id = create_ig_container(post)
+                creation_id = post.get("creation_id")
+                tiktok_publish_id = post.get("tiktok_publish_id")
+
+                if post_instagram:
+                    creation_id = create_ig_container(post)
+
+                if post_tiktok:
+                    tiktok_publish_id = publish_tiktok(post)
+
                 execute(
-                    "UPDATE posts SET status=%s, creation_id=%s, error=NULL WHERE id=%s" if is_postgres()
-                    else "UPDATE posts SET status=?, creation_id=?, error=NULL WHERE id=?",
-                    ("processing", creation_id, post["id"]),
+                    """
+                    UPDATE posts
+                    SET status=%s, creation_id=%s, tiktok_publish_id=%s, error=NULL
+                    WHERE id=%s
+                    """
+                    if is_postgres()
+                    else """
+                    UPDATE posts
+                    SET status=?, creation_id=?, tiktok_publish_id=?, error=NULL
+                    WHERE id=?
+                    """,
+                    ("processing", creation_id, tiktok_publish_id, post["id"]),
                 )
-                results.append({"id": post["id"], "status": "processing", "creation_id": creation_id})
+
+                results.append({
+                    "id": post["id"],
+                    "status": "processing",
+                    "creation_id": creation_id,
+                    "tiktok_publish_id": tiktok_publish_id,
+                })
+
+            # Si está procesando, termina Instagram si aplica
             else:
-                status = container_status(post["creation_id"])
-                if status.get("status_code") == "FINISHED":
-                    media_id = publish_container(post["creation_id"])
+                instagram_done = True
+
+                if post_instagram and post.get("creation_id") and not post.get("ig_media_id"):
+                    status = container_status(post["creation_id"])
+
+                    if status.get("status_code") == "FINISHED":
+                        media_id = publish_container(post["creation_id"])
+                        execute(
+                            "UPDATE posts SET ig_media_id=%s, error=NULL WHERE id=%s"
+                            if is_postgres()
+                            else "UPDATE posts SET ig_media_id=?, error=NULL WHERE id=?",
+                            (media_id, post["id"]),
+                        )
+                    elif status.get("status_code") == "ERROR":
+                        raise RuntimeError(status)
+                    else:
+                        instagram_done = False
+
+                if instagram_done:
                     execute(
-                        "UPDATE posts SET status=%s, ig_media_id=%s, error=NULL WHERE id=%s" if is_postgres()
-                        else "UPDATE posts SET status=?, ig_media_id=?, error=NULL WHERE id=?",
-                        ("published", media_id, post["id"]),
+                        "UPDATE posts SET status=%s, error=NULL WHERE id=%s"
+                        if is_postgres()
+                        else "UPDATE posts SET status=?, error=NULL WHERE id=?",
+                        ("published", post["id"]),
                     )
-                    results.append({"id": post["id"], "status": "published", "ig_media_id": media_id})
-                elif status.get("status_code") == "ERROR":
-                    raise RuntimeError(status)
+                    results.append({"id": post["id"], "status": "published"})
                 else:
-                    results.append({"id": post["id"], "status": status.get("status_code", "processing")})
+                    results.append({"id": post["id"], "status": "processing"})
+
         except Exception as e:
             execute(
-                "UPDATE posts SET status=%s, error=%s WHERE id=%s" if is_postgres()
+                "UPDATE posts SET status=%s, error=%s WHERE id=%s"
+                if is_postgres()
                 else "UPDATE posts SET status=?, error=? WHERE id=?",
                 ("error", str(e)[:1000], post["id"]),
             )
-            results.append({"id": post["id"], "status": "error", "error": str(e)[:300]})
+            results.append({
+                "id": post["id"],
+                "status": "error",
+                "error": str(e)[:300],
+            })
+
     return results
 
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        if request.form.get("password") == ADMIN_PASSWORD:
+        if request.form.get("password", "").strip() == ADMIN_PASSWORD.strip():
             session["ok"] = True
             return redirect(url_for("index"))
         return render_template("login.html", error="Contraseña incorrecta")
@@ -231,30 +345,61 @@ def create_post():
     caption = request.form.get("caption", "").strip()
     scheduled_local = request.form.get("scheduled_at", "").strip()
     video = request.files.get("video")
+
+    post_instagram = 1 if request.form.get("post_instagram") else 0
+    post_tiktok = 1 if request.form.get("post_tiktok") else 0
+
     if not caption or not scheduled_local or not video:
         return "Faltan campos", 400
 
-    # datetime-local llega sin zona; asumimos hora local del navegador/usuario.
+    if not post_instagram and not post_tiktok:
+        return "Elige al menos Instagram o TikTok", 400
+
     local_dt = datetime.fromisoformat(scheduled_local)
     scheduled_utc = local_dt.astimezone().astimezone(timezone.utc).isoformat()
+
     upload = cloudinary.uploader.upload(
         video,
-        resource_type="video"
+        resource_type="video",
+        folder="instagram_scheduler",
     )
+
     video_url = upload["secure_url"]
     now = datetime.now(timezone.utc).isoformat()
+
     execute(
-        "INSERT INTO posts (caption, video_url, scheduled_at, status, created_at) VALUES (%s,%s,%s,%s,%s)" if is_postgres()
-        else "INSERT INTO posts (caption, video_url, scheduled_at, status, created_at) VALUES (?,?,?,?,?)",
-        (caption, video_url, scheduled_utc, "pending", now),
+        """
+        INSERT INTO posts
+        (caption, video_url, scheduled_at, status, created_at, post_instagram, post_tiktok)
+        VALUES (%s,%s,%s,%s,%s,%s,%s)
+        """
+        if is_postgres()
+        else """
+        INSERT INTO posts
+        (caption, video_url, scheduled_at, status, created_at, post_instagram, post_tiktok)
+        VALUES (?,?,?,?,?,?,?)
+        """,
+        (
+            caption,
+            video_url,
+            scheduled_utc,
+            "pending",
+            now,
+            post_instagram,
+            post_tiktok,
+        ),
     )
+
     return redirect(url_for("index"))
 
 
 @app.route("/delete/<int:post_id>", methods=["POST"])
 @login_required
 def delete_post(post_id):
-    execute("DELETE FROM posts WHERE id=%s" if is_postgres() else "DELETE FROM posts WHERE id=?", (post_id,))
+    execute(
+        "DELETE FROM posts WHERE id=%s" if is_postgres() else "DELETE FROM posts WHERE id=?",
+        (post_id,),
+    )
     return redirect(url_for("index"))
 
 
@@ -262,6 +407,7 @@ def delete_post(post_id):
 def cron():
     if request.args.get("secret") != CRON_SECRET:
         return jsonify({"ok": False, "error": "bad secret"}), 403
+
     return jsonify({"ok": True, "results": process_due_posts()})
 
 
@@ -273,4 +419,8 @@ def health():
 init_db()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=True)
+    app.run(
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "5000")),
+        debug=True,
+    )
